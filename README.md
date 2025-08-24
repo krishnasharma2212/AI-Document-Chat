@@ -2,7 +2,9 @@
 
 AI Document Chat is an intelligent web application that allows users to have interactive conversations with Google's Gemini AI. It supports user authentication, file uploads to provide context for conversations, and saves chat history for a personalized experience.
 
-![AI Chat Interface](https://i.imgur.com/vH9YgEN.png)
+![AI Chat Interface](img/chat.png)
+![AI Chat Interface](img/signup.png)
+![AI Chat Interface](img/login.png)
 
 ## ✨ Features
 
