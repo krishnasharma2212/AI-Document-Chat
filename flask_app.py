@@ -1,389 +1,303 @@
-from flask import Flask, render_template, Response, stream_with_context, request,jsonify,session,redirect
+from flask import Flask, render_template, Response, stream_with_context, request, jsonify, session, redirect
 import os
 import google.generativeai as genai
 from firebase_admin import db
 import time
-
 import json
-# Get the current time in milliseconds since the epoch
-
 import firebase_admin
 from firebase_admin import credentials
-import os
-# Replace the JSON content here with the actual credentials from your service account
-service_account_info = json.loads(os.environ.get('FIREBASE_CREDENTIALS'))
+import cloudinary
+import cloudinary.uploader
 
+# ==============================================================================
+# CONFIGURATION - LOAD SECRETS FROM ENVIRONMENT VARIABLES
+# ==============================================================================
+
+# --- Firebase Configuration ---
+# Load Firebase credentials from a JSON string in an environment variable
+firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS')
+if not firebase_credentials_json:
+    raise ValueError("FIREBASE_CREDENTIALS environment variable not set.")
+service_account_info = json.loads(firebase_credentials_json)
 cred = credentials.Certificate(service_account_info)
 
+# Initialize Firebase
+firebase_database_url = os.environ.get('FIREBASE_DATABASE_URL')
+if not firebase_database_url:
+    raise ValueError("FIREBASE_DATABASE_URL environment variable not set.")
+firebase_admin.initialize_app(cred, {'databaseURL': firebase_database_url})
 
-
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://fauzanai-default-rtdb.firebaseio.com'
-})
-
-
+# --- Gemini AI Configuration ---
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
-genai.configure(api_key = gemini_api_key)
-model = genai.GenerativeModel(model_name='gemini-1.5-flash-latest',system_instruction=[
-        "You are super intelegent AI Product Search."
-    ],)
+if not gemini_api_key:
+    raise ValueError("GEMINI_API_KEY environment variable not set.")
+genai.configure(api_key=gemini_api_key)
+model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash-latest',
+    system_instruction=["You are a super intelligent AI assistant."]
+)
+
+# --- Cloudinary Configuration ---
+cloudinary.config(
+    cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.environ.get("CLOUDINARY_API_KEY"),
+    api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
+    secure=True
+)
+
+# ==============================================================================
+# FLASK APPLICATION SETUP
+# ==============================================================================
+
 app = Flask(__name__)
-app.secret_key = "fazuansecreatcodedontsharewith anyone"
-# Directory where the uploaded files will be saved
-UPLOAD_FOLDER = 'uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+# Load Flask secret key from environment variable
+flask_secret_key = os.environ.get('FLASK_SECRET_KEY')
+if not flask_secret_key:
+    raise ValueError("FLASK_SECRET_KEY environment variable not set.")
+app.secret_key = flask_secret_key
 
-# Ensure the upload folder exists
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+# Ensure a writable temporary directory exists (for Vercel)
+TMP_FOLDER = '/tmp/uploads'
+if not os.path.exists(TMP_FOLDER):
+    os.makedirs(TMP_FOLDER)
 
+# ==============================================================================
+# FILE HANDLING (Cloudinary + Gemini)
+# ==============================================================================
 
-def put_data(path, data):
+def uploadFile(file_content, filename):
     """
-    Store data in Firebase Realtime Database at the specified path.
-
-    Args:
-    path (str): The path in the database where data should be stored.
-    data (dict): The data to be stored in the database.
-
-    Example:
-    put_data('users/user1', {'name': 'John', 'age': 30})
+    Uploads a file to both Cloudinary (for storage) and Gemini (for analysis).
+    Returns a dictionary containing the Gemini file object and the Cloudinary URL.
     """
-    ref = db.reference(path)
-    ref.set(data)
-    print(f"Data successfully written to {path}")
-
-# Function to retrieve data from Firebase Realtime Database
-def get_data(path):
-    """
-    Retrieve data from Firebase Realtime Database at the specified path.
-
-    Args:
-    path (str): The path in the database from which data should be retrieved.
-
-    Returns:
-    dict: The retrieved data.
-    """
-    ref = db.reference(path)
-    data = ref.get()
-    if data:
-        print(f"Data retrieved from {path}: {data}")
-    else:
-        print(f"No data found at {path}")
-    return data
-def uploadFile(file_content,filename):
-    filename = f"uploads/{filename}"
-    # Create a temporary file to save the content
-    # with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-    #     temp_file.write(file_content)
-    #     temp_file.flush()  # Make sure all content is written
-    #     temp_file_path = temp_file.name
-
-    with open(filename,"wb") as file:
-        file.write(file_content)
-        file.flush()
-
-
-
-
+    # 1. Upload to Cloudinary for permanent storage
     try:
+        cloudinary_upload_result = cloudinary.uploader.upload(file_content)
+        cloudinary_url = cloudinary_upload_result.get('secure_url')
+    except Exception as e:
+        print(f"Error uploading to Cloudinary: {e}")
+        cloudinary_url = None
 
-        # Upload the temporary file to Gemini using the file path
+    # 2. Write to a temporary file for Gemini upload (Vercel uses /tmp)
+    temp_file_path = os.path.join(TMP_FOLDER, filename)
+    with open(temp_file_path, "wb") as file:
+        file.write(file_content)
 
-        response = genai.upload_file(path=filename)
-
+    # 3. Upload the temporary file to Gemini for analysis
+    gemini_file_response = None
+    try:
+        gemini_file_response = genai.upload_file(path=temp_file_path)
+    except Exception as e:
+        print(f"Error uploading to Gemini: {e}")
     finally:
-        # Clean up the temporary file
-        os.remove(filename)
+        # 4. Clean up the temporary file
+        os.remove(temp_file_path)
 
-    return response
-# Function to handle the prompt and file input
-def prompt(inp,chatId, files=[]):
+    return {
+        "gemini_file": gemini_file_response,
+        "cloudinary_url": cloudinary_url
+    }
+
+# ==============================================================================
+# CORE CHAT AND PROMPT LOGIC
+# ==============================================================================
+
+def prompt(inp, chatId, files=[]):
+    """
+    Handles a user's prompt, processes optional files, and streams the AI response.
+    """
     try:
         history = get_chat(chatId)
         chats = model.start_chat(history=history)
 
-
-        sendFiles = []
-        saved_file_metadata = []  # List to store file metadata for saving in Firebase
+        gemini_files_to_send = []
+        file_metadata_for_history = []
 
         if files:
             for file in files:
-                file_content = file.read()  # Read file content into bytes
-                sendFiles.append(uploadFile(file_content, file.filename))
-                saved_file_metadata.append(file.filename)
+                file_content = file.read()
+                upload_results = uploadFile(file_content, file.filename)
 
+                if upload_results["gemini_file"]:
+                    gemini_files_to_send.append(upload_results["gemini_file"])
+                
+                # Store original filename and its permanent Cloudinary URL for history
+                file_metadata_for_history.append({
+                    "filename": file.filename,
+                    "url": upload_results["cloudinary_url"]
+                })
 
-            sendFiles.append(inp)  # Append input with the files
-            append_chat_without_retrieve(chatId, {"role": "user", 'parts': [inp,f"Uploaded Files - {saved_file_metadata}"]})
+            # Create the message parts for the user's prompt in Firebase
+            user_parts_for_history = [inp, f"Uploaded Files: {json.dumps(file_metadata_for_history)}"]
+            append_chat_without_retrieve(chatId, {"role": "user", 'parts': user_parts_for_history})
 
-            response = chats.send_message(sendFiles, stream=True)
-            fullResponse = ""
-            for chunk in response:
-                fullResponse += chunk.text
-                yield chunk.text.encode('utf-8')
+            # Send the text prompt and the actual file data to Gemini
+            gemini_prompt_content = [inp] + gemini_files_to_send
+            response = chats.send_message(gemini_prompt_content, stream=True)
 
         else:
+            append_chat_without_retrieve(chatId, {"role": "user", 'parts': [inp]})
             response = chats.send_message(inp, stream=True)
-            fullResponse = ""
-            for chunk in response:
-                fullResponse += chunk.text
-                yield chunk.text.encode('utf-8')
 
-        append_chat_without_retrieve(chatId,{"role":"model",'parts':[fullResponse]})
+        # Stream the response and build the full response for history
+        fullResponse = ""
+        for chunk in response:
+            fullResponse += chunk.text
+            yield chunk.text.encode('utf-8')
+        
+        # Save the complete model response to history
+        append_chat_without_retrieve(chatId, {"role": "model", 'parts': [fullResponse]})
+
     except Exception as e:
+        print(f"Error in prompt function: {e}")
+        yield str(e).encode('utf-8')
 
-        print(e)
-        return str(e).encode('utf-8')
-def register_user(name, email, password):
-    """
-    Registers a new user in Firebase Realtime Database.
+# ==============================================================================
+# FIREBASE DATABASE FUNCTIONS (User and Chat Management)
+# ==============================================================================
 
-    Args:
-    name (str): The name of the user.
-    email (str): The email of the user.
-    password (str): The password of the user.
-
-    Returns:
-    str: A message indicating whether registration was successful or an error occurred.
-    """
-    # Replace "." with "," in email to use as a valid Firebase key
-    email_key = email.replace('.', ',')
-
+def get_chat(id):
     try:
-        # Reference to the user's node in the database
-        ref = db.reference(f'users/{email_key}')
+        ref = db.reference(f'chats/{id}')
+        data = ref.get()
+        return [data[key] for key in data] if data else []
+    except Exception as e:
+        print(f"Error getting chat: {e}")
+        return []
 
-        # Check if user already exists
+def append_chat_without_retrieve(id, new_chat):
+    try:
+        ref = db.reference(f'chats/{id}')
+        ref.push(new_chat)
+        return True
+    except Exception as e:
+        return False
+
+def register_user(name, email, password):
+    email_key = email.replace('.', ',')
+    try:
+        ref = db.reference(f'users/{email_key}')
         if ref.get() is not None:
             return f"User with email {email} already exists."
-
-        # Hash the password before storing
-        hashed_password = password
-
-        # Save the new user's data
-        ref.set({
-            'name': name,
-            'email': email,
-            'password': hashed_password  # Store hashed password
-        })
-
-        return f"success"
-
+        ref.set({'name': name, 'email': email, 'password': password})
+        return "success"
     except Exception as e:
         return f"Error registering user: {e}"
+
 def login_user(email, password):
-    """
-    Logs in a user by checking credentials against Firebase Realtime Database.
-
-    Args:
-    email (str): The email of the user.
-    password (str): The password of the user.
-
-    Returns:
-    str: A success message with user info or an error message.
-    """
-    # Replace "." with "," in email to use as a valid Firebase key
     email_key = email.replace('.', ',')
-
     try:
-        # Reference to the user's node in the database
         ref = db.reference(f'users/{email_key}')
         user_data = ref.get()
-
-        if user_data is None:
-            return "User not found."
-
-        # Verify the password
-        hashed_password = password
-        if user_data['password'] == hashed_password:
-            return True
-        else:
-            return False
-
-    except Exception as e:
+        return user_data and user_data.get('password') == password
+    except Exception:
         return False
 
 def get_user(email, password):
-
-    # Replace "." with "," in email to use as a valid Firebase key
     email_key = email.replace('.', ',')
-
     try:
-        # Reference to the user's node in the database
         ref = db.reference(f'users/{email_key}')
         user_data = ref.get()
-
-        if user_data is None:
-            return "User not found."
-
-        # Verify the password
-        hashed_password = password
-        if user_data['password'] == hashed_password:
-            return user_data
-        else:
-            return False
-
-    except Exception as e:
-        return False
-
-def get_chat(id):
-
-    try:
-        # Reference to the user's node in the database
-        ref = db.reference(f'chats/{id}')
-        user_data = ref.get()
-
-        user_data = list(map(lambda x: user_data[x],user_data))
-
-        return user_data
-
-    except Exception as e:
+        return user_data if user_data and user_data.get('password') == password else None
+    except Exception:
         return None
-
-def append_chat_without_retrieve(id, new_chat):
-    """
-    Appends a new chat item to the list in Firebase Realtime Database without retrieving the entire list.
-
-    Args:
-    id (str): The ID of the chat.
-    new_chat (dict): The new chat dictionary to append.
-
-    Returns:
-    str: A success message or error message.
-    """
-    try:
-        # Reference to the chats node in the database with a unique key for each chat
-        ref = db.reference(f'chats/{id}')
-
-        # Push the new chat item to the database
-        ref.push(new_chat)
-
-        return True
-
-    except Exception as e:
-        return False
-
 
 def allChatUser(email):
     email_key = email.replace('.', ',')
-
     try:
-        # Reference to the user's node in the database
         ref = db.reference(f'users/{email_key}/chats')
-        user_data = ref.get()
-
-        user_data = list(map(lambda x: user_data[x],user_data))
-
-        return user_data
-
+        data = ref.get()
+        return [data[key] for key in data] if data else []
     except:
-        pass
+        return []
 
-def addToUser(email,id):
-    # Replace "." with "," in email to use as a valid Firebase key
+def addToUser(email, id):
     email_key = email.replace('.', ',')
-
     try:
-        # Reference to the user's node in the database
         ref = db.reference(f'users/{email_key}/chats')
         ref.push(id)
-
-
-
-    except Exception as e:
+    except Exception:
         return False
 
-
-
+# ==============================================================================
+# FLASK ROUTES
+# ==============================================================================
 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect("/login")
+
 @app.route('/')
 def home():
-    if "email" in session and login_user(session['email'],session['password']):
-        userData = get_user(session['email'],session['password'])
-        icon = ""
-        for i in userData['name'].split(" "):
-            icon+=i[0]
-        chat = request.args.get('chat')
-        if chat == None:
-            chat = []
-        else:
-            chat = get_chat(chat)
+    if "email" in session and login_user(session['email'], session['password']):
+        userData = get_user(session['email'], session['password'])
+        if not userData: return redirect('/login')
+        
+        icon = "".join(i[0] for i in userData['name'].split())
+        chat_id = request.args.get('chat')
+        chat_history = get_chat(chat_id) if chat_id else []
+        
+        all_chats_list = allChatUser(session['email'])
+        if all_chats_list:
+            all_chats_list.reverse()
+            
+        return render_template(
+            'index.html',
+            icon=icon,
+            name=userData['name'],
+            email=userData['email'],
+            chat=json.dumps(chat_history),
+            allChat=json.dumps(all_chats_list)
+        )
+    return redirect('/login')
 
 
-        allChatsList = allChatUser(session['email'])
-        allChatsList.reverse()
-        return render_template('index.html',icon=icon,name=userData['name'],email=userData['email'],chat=json.dumps(chat),allChat=json.dumps(allChatsList))
-    else:
-        return redirect('/login')
-
-
-@app.route('/signup',methods=['POST',"GET"])
+@app.route('/signup', methods=['POST', 'GET'])
 def signup():
-    if "email" in session and login_user(session['email'],session['password']):
+    if "email" in session and login_user(session['email'], session['password']):
         return redirect('/')
-
     if request.method == "POST":
         data = request.get_json()
-
-        return jsonify({"data":register_user(data['name'],data['email'],data['password'])})
+        result = register_user(data['name'], data['email'], data['password'])
+        return jsonify({"data": result})
     return render_template('register.html')
-@app.route('/login',methods=['POST',"GET"])
+
+
+@app.route('/login', methods=['POST', 'GET'])
 def login():
-    if "email" in session and login_user(session['email'],session['password']):
+    if "email" in session and login_user(session['email'], session['password']):
         return redirect('/')
     if request.method == "POST":
         data = request.get_json()
-        email = data['email']
-        password = data['password']
-
-        m = login_user(email,password)
-        if m:
+        email, password = data['email'], data['password']
+        if login_user(email, password):
             session['email'] = email
             session['password'] = password
-
-        return jsonify({"data":m})
+            return jsonify({"data": True})
+        return jsonify({"data": False})
     return render_template('login.html')
+
 
 @app.route('/generate', methods=['POST'])
 def generate():
     if "email" not in session:
-        return "Login Error"
-    isFile = True
-    # Check if files are present in the request
-    if 'files' not in request.files:
-        isFile = False
+        return "Login Error", 401
 
-
-    files = request.files.getlist('files') if isFile else []  # Get the list of files
-
-    # Get additional text data from the request
-    promptText = request.form.get('prompt')
+    files = request.files.getlist('files')
+    promptText = request.form.get('prompt', ' ')
     chatId = request.form.get('chatId')
 
-
-    if chatId == "null":
+    if chatId == "null" or not chatId:
         chatId = str(int(time.time() * 1000))
+        title_response = model.generate_content(
+            f"On the basis of this prompt, create a short title for a new chat. Prompt: '{promptText}'. Only return the title."
+        )
+        chat_title = title_response.text.strip().replace('"', '')
+        addToUser(session['email'], [chatId, chat_title])
 
-        addToUser(session['email'],[chatId,model.generate_content(f"On the basis of the first prompt of user - '{promptText}'. Title the chat only return title.").text])
-
-
-
-
-
-    if not promptText:
-        promptText = " "
-
-
-
-    # Stream the response back in chunks
-    # Stream the response back in chunks
     response = Response(stream_with_context(prompt(promptText, chatId, files)), content_type='text/plain')
-    response.headers['Chat-Id'] = chatId  # Set the Chat-Id in the response headers
+    response.headers['Chat-Id'] = chatId
     return response
 
 
