@@ -149,8 +149,8 @@
     </style>
 
     <!-- CSS HS -->
-    <link rel="stylesheet" href="/static/tailwind.css">
-    <link rel="stylesheet" href="/static/prism.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='tailwind.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='prism.css') }}">
 </head>
 
 <body class="dark:bg-neutral-900" data-prismjs-copy-timeout="500" style="overflow-y: hidden;">
@@ -179,7 +179,7 @@
                         </svg>
                     </button>
                     <a href="/" class="flex ms-2 md:me-24">
-                        <img src="/static/logo.jpg" class="h-8 me-3" alt="Logo" />
+                        <img src="{{ url_for('static', filename='logo.jpg') }}" class="h-8 me-3" alt="Logo" />
                         <span
                             class="self-center text-xl font-semibold sm:text-2xl whitespace-nowrap dark:text-white">AI Chat Document</span>
                     </a>
@@ -291,7 +291,7 @@
                 <div class="text-center mt-10">
                     <a class="inline-block mb-4 flex-none focus:outline-none focus:opacity-80" href="#"
                         aria-label="Preline">
-                        <img src="/static/logo.jpg" class="rounded-full w-20" alt="">
+                        <img src="{{ url_for('static', filename='logo.jpg') }}" class="rounded-full w-20" alt="">
                     </a>
 
                     <h1 class="text-3xl font-bold text-gray-800 sm:text-4xl dark:text-white">
@@ -427,8 +427,8 @@
 
 
 
-    <script src="/static/prism.js"></script>
-    <script src="/static/custom.js"></script>
+    <script src="{{ url_for('static', filename='prism.js') }}"></script>
+    <script src="{{ url_for('static', filename='custom.js') }}"></script>
 
     <script>
         const chatsData = {{ chat | safe}}
@@ -503,7 +503,7 @@
                 liAI.classList.add('flex', 'gap-x-2', 'sm:gap-x-4');
                 i += 1
                 const rawAI = `
-<img src="/static/logo.jpg" class="rounded-full" alt="" style="
+<img src="{{ url_for('static', filename='logo.jpg') }}" class="rounded-full" alt="" style="
 width: 38px;
 height: 38px;
 ">
