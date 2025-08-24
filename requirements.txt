@@ -2,3 +2,4 @@ Flask
 google-generativeai
 firebase-admin
 cloudinary
+gunicorn
