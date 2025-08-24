@@ -11,7 +11,7 @@ import firebase_admin
 from firebase_admin import credentials
 import os
 # Replace the JSON content here with the actual credentials from your service account
-service_account_info = json.load(os.environ.get('FIREBASE_CREDENTIALS'))
+service_account_info = json.loads(os.environ.get('FIREBASE_CREDENTIALS'))
 
 cred = credentials.Certificate(service_account_info)
 
